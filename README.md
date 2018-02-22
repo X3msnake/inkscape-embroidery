@@ -1,17 +1,34 @@
-# inkscape-embroidery: An Inkscape plugin for designing machine embroidery patterns
+# ink/stitch: An Inkscape extension for designing machine embroidery patterns
+
+* February 5, 2018: Portuguese (pt_PT) translation added!  [Want to help translate?](LOCALIZATION.md)
+* January 5, 2018: Default DPI changed to 96, to match Inkscape.
+* January 3, 2018: Project renamed from `inkscape-embroidery` to **ink/stitch**
+* **NEW January 1, 2018:** [video demo of the new live stitch preview feature](https://youtu.be/QY9NcLN3oJM)
+* **NEW December 6, 2017:** [video demo of how to use the extension](https://www.youtube.com/watch?v=qXntE1X1RIw)
+
 ## Introduction
 **Want to design embroidery pattern files (PES, DST, etc) using free, open source software?  Hate all the other options?  Try this one.**
 
-I received a really wonderful christmas gift for a geeky programmer hacker: an [embroidery machine](http://www.brother-usa.com/homesewing/ModelDetail.aspx?ProductID=SE400).  It's pretty much a CNC thread-bot... I just had to figure out how to design programs for it.  The problem is, **all free embroidery design software seems to be terrible**, especially when you add in the requirement of being able to run in Linux, my OS of choice.
+I received a really wonderful christmas gift for a geeky programmer hacker: an [embroidery machine](http://www.brother-usa.com/homesewing/ModelDetail.aspx?ProductID=SE400).  It's pretty much a CNC thread-bot... I just had to figure out how to design programs for it.  The problem is, **all free embroidery design software seemed to be terrible**, especially when you add in the requirement of being able to run in Linux, my OS of choice.
 
 So I wrote one.
 
-Okay, not really.  I'm pretty terrible at GUIs, but I found this nifty inkscape extension that was created and hacked on by a couple of other folks.  It was pretty rudimentary, but it got the job done, and more importantly, it was super hackable.  I hacked the hell out of it, and at this point **inkscape-embroidery is a viable entry-level machine embroidery design tool**.
+Okay, not really.  I'm pretty terrible at GUIs, but I found this nifty inkscape extension that was created and hacked on by a couple of other folks.  It was pretty rudimentary, but it got the job done, and more importantly, it was super hackable.  I hacked the hell out of it, and at this point **ink/stitch is a viable entry-level machine embroidery design tool**.
 
+## Quick Setup On Ubuntu 14.04 or later (and derivative Linux distributions)
 
-## Setup
+Download the [latest release](https://github.com/lexelby/inkstitch/releases/latest), the `inkscape-*.tar.gz` file.  Decompress this archive directly into `~/.config/inkscape/extensions`, for example:
 
-To use this tool, you're going to need to set it up.  It's an inkscape extension written as a Python file.  Once you get it working, you'll need to learn how to design vectors in the way that inkscape-embroidery expects, and then you can generate your design files.
+```
+$ cd ~/.config/inkscape/extensions
+$ tar zxf ~/Downloads/inkstitch-v1.0.0-Linux-x86_64.tar.gz
+```
+
+That's it!  All python libraries and external dependencies are bundled (using the excellent [pyinstaller](http://www.pyinstaller.org)), so you shouldn't need to set anything else up.  Just restart Inkscape and the extension should be ready to go.
+
+Continue reading in the "Usage" section.
+
+## Manual Setup
 
 ### Inkscape
 First, install Inkscape if you don't have it.  I highly recommend version 0.92 or greater, which has a really key feature: the Objects panel.  This gives you a heirarchical list of objects in your SVG file, listed in their stacking order.  This is really important because the stacking order dictates the order that the shapes will be sewn in.
@@ -26,19 +43,10 @@ pip install -r requirements.txt
 ```
 
 ### Extension installation
-1. Clone the extension source: `git clone https://github.com/lexelby/inkscape-embroidery`
-2. Install it as directed [here](https://inkscape.org/da/gallery/%3Dextension/)
+1. Clone the extension source: `git clone https://github.com/lexelby/inkstitch`
+2. Install it as directed [here](https://inkscape.org/en/gallery/%3Dextension/)
 
 I prefer to symbolically link into my git clone, which allows me to hack on the code.  Changes to the Python code take effect the next time the extension is run.  Changes to the extension description files (`*.inx`) take effect the next time Inkscape is restarted
-
-### Optional: conversion program
-The extension can output machine embroidery design files directly in Melco format.  I don't even know what that is, so I don't use it.  I prefer to use the **CSV output format** which can be consumed by another awesome open source project: [Embroidermodder2](https://github.com/Embroidermodder/Embroidermodder).  In theory, this project was going to be exactly what I wanted.  In practice, it never got funded on Kickstarter and it's largely incomplete.
-
-However, it contains a really awesome core library that knows pretty much every machine embroidery format and how to convert between them.  I use it to convert the CSV files that inkscape-embroidery outputs into the PES files that my SE400 uses.
-
-Grab the source: `git clone https://github.com/Embroidermodder/Embroidermodder`.  Build just `libembroidery-convert` using the instructions in "3)" in the [Embroidermodder build docs](https://github.com/Embroidermodder/Embroidermodder/wiki/Compiling-parts-of-the-project). You can then use it like this: `./libembroidery-convert your-file.csv your-file.pes`.
-
-Since the CSV + libembroidery-convert method is the only method I use, it's the one I'll assume from here on.  I'm not even sure if the other output formats from inkscape-embroidery still work (or ever worked).
 
 ## Usage
 ### Basic Usage
@@ -46,35 +54,33 @@ First things first: I'm going to assume you know a few embroidery terms like "fi
 
 1. Open up Inkscape and create a rectangle.
 2. Make sure it has both a stroke and a fill.
-3. Convert it to a path using **Path -> Object to Path** (because inkscape-embroidery doesn't understand rectangles, circles, and the like, and ignores them).
+3. Convert it to a path using **Path -> Object to Path** (because ink/stitch doesn't understand rectangles, circles, and the like, and ignores them).
 4. Run **Extensions -> Embroidery -> Embroider**.  Use the default settings.
 
-The rectangle you made will disappear and be replaced with some stripes and zig-zags.  inkscape-embroidery has hidden all of your layers and created a new one called Embroidery, in which it has palced a visual representation of the stitch plan it created.  It has interpreted your shape as two instructions: Fill and Stroke.  Fill is implemented using fill stitching, and Stroke is implemented by running satin stitching along the outline.
+The rectangle you made will disappear and be replaced with some stripes and zig-zags.  ink/stitch has hidden all of your layers and created a new one called Embroidery, in which it has palced a visual representation of the stitch plan it created.  It has interpreted your shape as two instructions: Fill and Stroke.  Fill is implemented using fill stitching, and Stroke is implemented by running satin stitching along the outline.
 
 Select the horizontal lines using the "Edit Paths by Nodes" tool.  Zoom in a bit and you'll see that the lines are actually made up of lots of points.  Each point represents one stitch -- one needle penetration and interlocking of the top thread with the bobbin thread.  Notice how the points all line up nicely in diagonals.  This will give the fill stitching a nice, orderly visual appearance.
 
 Now look at the zig-zags.  These are the satin stitches.  Note that the corners look pretty ugly.  This is because satin stitches generated from a shape's stroke are pretty rudimentary and aren't implemented intelligently.  You can exert much greater control over satin stitching using a Satin Column, described later.
 
-The stitching preview you're looking at just now isn't intended to be permanent.  I usually immediately undo it (ctrl-Z) after I've looked at the stitches.  The actual work that inkscape-embroidery does is to output a design file.
+The stitching preview you're looking at just now isn't intended to be permanent.  I usually immediately undo it (ctrl-Z) after I've looked at the stitches.  The actual work that ink/stitch does is to output a design file.
 
 ### Stitching Out the Design
 Where'd the design file go?  One of the parameters you were able to specify in the filter settings dialog was the output directory.  By default, the directory used is the place where you installed the extension's Python files.  I output mine to `~/Documents/embroidery/output`.
 
-inkscape-embroidery will create a file named `something.csv`, where `something` is the name of your svg file (e.g. `something.svg`).  If `something.csv` already existed, it will be renamed to `something.csv.1`, and `something.csv.1` will be renamed to `something.csv.2`, etc, up to 5 backup copies.  When you've got the design the way you like it, save off a copy of `something.csv`.
-
-Next, convert it to your machine's format using `libembroidery-convert` (as described above).  Send it to your machine in whatever way one does that for your machine, and try stitching it out!
+ink/stitch will create a file named `something.___`, where `something` is the name of your svg file (e.g. `something.svg`) and `___` is the proper extension for the output format you select.  If `something.___` already exists, it will be renamed to `something.___.1`, and `something.___.1` will be renamed to `something.___.2`, etc, up to 5 backup copies.  When you've got the design the way you like it, save off a copy of `something.___`.
 
 ### Ordering
 
 Copy your rectangle and paste it elsewhere on your canvas.  Deselect any shapes (**Edit -> Deselect**), re-run the extension, and look at the output.  You'll see that both regions have been stitched, and there will be a line connecting them.  That's a jump-stitch, where the machine will move a long distance between stitching the sections.
 
-If you're like me, your machine can't automatically cut the thread between stitching sections, so you'll need to minimize jump stitches as much as possible through careful planning of your stitch path.  If your machine *can* do thread cuts, congratulations!  But you'll need to modify inkscape-embroidery to allow you to specify a thread cut, because there's no way to do that right now.
+If you're like me, your machine can't automatically cut the thread between stitching sections, so you'll need to minimize jump stitches as much as possible through careful planning of your stitch path.  If your machine *can* do thread cuts, congratulations!  But you'll need to modify ink/stitch to allow you to specify a thread cut, because there's no way to do that right now.
 
-However, note that inkscape-embroidery pays attention to the colors you use for objects.  If you change colors from one object to the next, inkscape-embroidery will include a color-change instruction using the color you've set for the object.  My machine cuts the thread and waits for me to switch to the new thread color.
+However, note that ink/stitch pays attention to the colors you use for objects.  If you change colors from one object to the next, ink/stitch will include a color-change instruction using the color you've set for the object.  My machine cuts the thread and waits for me to switch to the new thread color.
 
 #### Reordering
 
-Use the Objects panel to view the stacking order of the objects in your SVG file.  Inkscape-embroidery will stitch them in their stacking order, from lowest to highest.  You can reorder them in the normal way in inkscape to affect the stitching order.
+Use the Objects panel to view the stacking order of the objects in your SVG file.  ink/stitch will stitch them in their stacking order, from lowest to highest.  You can reorder them in the normal way in inkscape to affect the stitching order.
 
 You can also use the Reorder extension.  Hold shift and select the objects you'd like to reorder, one at a time, in the order you'd like them to end up in (lowest to highest).  Run **Embroidery -> Reorder**.  This extension will pull all of the selected objects out of wherever they were in the stacking order and insert them in order at the same place as the *first* object you selected.  This can save you a ton of time.  NOTE: this stopped working in more recent versions of inkscape, which no longer tell the extension what order you selected objects in.
 
@@ -92,7 +98,7 @@ Parameters are stored in your SVG file as additional attributes on the XML objec
 I recommend avoiding dependence on the default settings specified in the **Embroider** extension's settings window.  In fact, I bypass it entirely by binding a keystroke (ctrl+e) to "Embroider (no preferences)" in Inkscape's settings.  This way, I can quickly see the stitch plan just by pressing the keystroke.  I also bind a keystroke to **Params** so that I can quickly view and change settings for each object.
 
 ### Sidenote on extensions
-**Params** is a bit weird, in that the dialog is produced by an entirely separate program (the extension) rather than Inkscape itself.  This is due to the way Inkscape structures extensions.  I wish inkscape-embroidery could have deeper integration into Inkscape's user interface, but it's currently not possible.  This is the price we pay for not having to write an entire vector graphics editor program :)
+**Params** is a bit weird, in that the dialog is produced by an entirely separate program (the extension) rather than Inkscape itself.  This is due to the way Inkscape structures extensions.  I wish ink/stitch could have deeper integration into Inkscape's user interface, but it's currently not possible.  This is the price we pay for not having to write an entire vector graphics editor program :)
 
 Another issue is that Inkscape has a memory leak related to extensions.  The more times you run an extension, the more memory Inkscape uses and the slower it gets.  I periodically save my SVG file, close Inkscape, and restart it to work around this issue.  See above re: putting up with this kind of hassle so as not to have a to implement an entire vector graphics editor.  Hopefully they'll fix this bug soon.
 
@@ -100,7 +106,7 @@ Another issue is that Inkscape has a memory leak related to extensions.  The mor
 
 AutoFill is the default method for generating fill stitching.  To use it, create a closed path in Inskcape and add a fill color.  This algorithm works for complex shapes with or without holes.
 
-inkscape-embroidery will break the shape up into sections that it can embroider at once using back-and-forth rows of stitches.  It then adds straight-stitching between sections until it's filled in the entire design.  The staggered pattern of stitches is continued seamlessly between sections, so the end result doesn't appear to have any breaks.  When moving from one section to the next, it generates running stitching along the border of the shape.
+ink/stitch will break the shape up into sections that it can embroider at once using back-and-forth rows of stitches.  It then adds straight-stitching between sections until it's filled in the entire design.  The staggered pattern of stitches is continued seamlessly between sections, so the end result doesn't appear to have any breaks.  When moving from one section to the next, it generates running stitching along the border of the shape.
 
 
 #### AutoFill parameters
@@ -132,7 +138,7 @@ The **flip** option can help you with routing your stitch path.  When you enable
 
 ### Running Stitch
 
-Running stitch can be created by setting a dashed stroke on a path.  Any kind of dashes will do the job, and the stroke width is irrelevant.   inkscape-embroidery will create stitches along the path using the stroke width you specify.
+Running stitch can be created by setting a dashed stroke on a path.  Any kind of dashes will do the job, and the stroke width is irrelevant.   ink/stitch will create stitches along the path using the stroke width you specify.
 
 In order to avoid rounding corners, ash extra stitch will be added at the point of any sharp corners.
 
@@ -184,7 +190,7 @@ This is essentially a lower-density satin stitch sewn to the end of the column a
 
 ## Workflow
 
-Here's how I use inkscape-embroidery to design embroidery patterns.
+Here's how I use ink/stitch to design embroidery patterns.
 
 ### Pixels Per Millimeter
 
@@ -192,7 +198,7 @@ My embroidery machine (a Brother SE400) can handle patterns up to 10cm x 10cm (a
 
 My machine can (theoretically) position the needle with an accuracy of a tenth of a millimeter.  The Brother PES format cannot encode a position any more precisely than this.  In practice, even if a machine had finer accuracy than this, the realities of sewing on real fabric, even with the best stabilizer, mean that you can't get any more accurate than this (and you shouldn't bother trying).
 
-I set the Inkscape's default document size to 1000 x 1000 pixels and set the "Pixels Per Millimeter" setting in **Embroider** to ten.  This means that every "pixel" in Inkscape is worth a tenth of a millimeter.  Practically speaking, there's no reason I couldn't choose to have one "pixel" equal one millimeter, because pixels don't really have much meaning in vector graphics.
+Previously, I used a nonstandard resolution of 10 pixels per millimeter, and this was hardcoded into ink/stitch.  Now, **ink/stitch respects Inkscape's default of 96dpi**.
 
 ### Step 1: Sketch design or use an image
 
@@ -262,15 +268,15 @@ To solve this, I created the *Reorder* extension.  To use it, hold down the shif
 
 You can also manually manipulate the underlying SVG XML structure by using Inkscape's XML Editor pane.  Its "Raise" and "Lower" buttons directly manipulate the order of XML tags in the SVG file and are not subject to the same limitations as PageUp and PageDown.  Note that the ordering of XML tags in the XML Editor tool is the _reverse_ of the order of objects in the Objects tool.
 
-### Step 4: Render to CSV
+### Step 4: Render to a file format supported by your machine
 
-Once I've got everything in the right order, I deselect all objects and run *Embroider* again.  This will embroider all visible objects in the document.  As described in the Setup section above, I render my embroidery file in CSV format and convert it with EmbroiderModder's `libembroidery-convert` utility.
+Once I've got everything in the right order, I deselect all objects and run *Embroider* again.  This will embroider all visible objects in the document.  In the extension settings, select a file format supported by your machine.  Most machines can support DST, and some Brother machines prefer PES.
 
-*Embroider* will create a file in the specified output directory named after your SVG file, but with the extension changed to `.csv`.  It will back up any existing file there, storing up to 5 old copies of each file.
+*Embroider* will create a file in the specified output directory named after your SVG file, but with the extension changed to `.DST`, `.PES`, or whatever format you selected.  It will back up any existing file there, storing up to 5 old copies of each file.
 
 ### Step 5: Convert to PES and upload
 
-My sewing machine uses the PES format, so I convert the CSV file into a .PES and send it over to my sewing machine.  My Brother SE400 acts like a (very small!) USB flash drive.  I use a [script](bin/embroider-remote) to do the CSV and upload steps all at once.
+Transfer the design to your machine in whatever manner is appropriate.  My machine exposes itself as a (tiny) USB thumb drive, so I can upload directly.
 
 ### Step 6: Test-sew
 
@@ -280,5 +286,5 @@ I sew out the design, watching the machine to make sure that there aren't any su
 
 ### Step 7+: iterate
 
-Then I go back and tweak my design.  Hopefully it only takes a few tries to get it how I want it.  Once I'm done, I copy the CSV file from my output directory, just to avoid accidentally overwriting it in the future.
+Then I go back and tweak my design.  Hopefully it only takes a few tries to get it how I want it.  Once I'm done, I copy the final embroidery file from my output directory, just to avoid accidentally overwriting it in the future.
 

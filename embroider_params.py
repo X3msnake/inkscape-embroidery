@@ -5,22 +5,28 @@ import os
 import sys
 import json
 import traceback
+import time
+from threading import Thread, Event
+from copy import copy
 from cStringIO import StringIO
 import wx
 from wx.lib.scrolledpanel import ScrolledPanel
 from collections import defaultdict
 import inkex
-from embroider import Param, EmbroideryElement, Fill, AutoFill, Stroke, SatinColumn, descendants
+import inkstitch
+from inkstitch import _, Param, EmbroideryElement, get_nodes
+from embroider import Fill, AutoFill, Stroke, SatinColumn
 from functools import partial
 from itertools import groupby
+from embroider_simulate import EmbroiderySimulator
 
 
 def presets_path():
     try:
         import appdirs
-        config_path = appdirs.user_config_dir('inkscape-embroidery')
+        config_path = appdirs.user_config_dir('inkstitch')
     except ImportError:
-        config_path = os.path.expanduser('~/.inkscape-embroidery')
+        config_path = os.path.expanduser('~/.inkstitch')
 
     if not os.path.exists(config_path):
         os.makedirs(config_path)
@@ -57,14 +63,14 @@ def delete_preset(name):
     save_presets(presets)
 
 
-def confirm_dialog(parent, question, caption = 'inkscape-embroidery'):
+def confirm_dialog(parent, question, caption = 'ink/stitch'):
     dlg = wx.MessageDialog(parent, question, caption, wx.YES_NO | wx.ICON_QUESTION)
     result = dlg.ShowModal() == wx.ID_YES
     dlg.Destroy()
     return result
 
 
-def info_dialog(parent, message, caption = 'inkscape-embroidery'):
+def info_dialog(parent, message, caption = 'ink/stitch'):
     dlg = wx.MessageDialog(parent, message, caption, wx.OK | wx.ICON_INFORMATION)
     dlg.ShowModal()
     dlg.Destroy()
@@ -128,8 +134,17 @@ class ParamsTab(ScrolledPanel):
     def set_parent_tab(self, tab):
         self.parent_tab = tab
 
+    def is_dependent_tab(self):
+        return self.parent_tab is not None
+
+    def enabled(self):
+        if self.toggle_checkbox:
+            return self.toggle_checkbox.IsChecked()
+        else:
+            return True
+
     def update_toggle_state(self, event=None, notify_pair=True):
-        enable = self.toggle_checkbox.IsChecked()
+        enable = self.enabled()
         # print self.name, "update_toggle_state", enable
         for child in self.settings_grid.GetChildren():
             widget = child.GetWindow()
@@ -137,7 +152,7 @@ class ParamsTab(ScrolledPanel):
                 child.GetWindow().Enable(enable)
 
         if notify_pair and self.paired_tab:
-            self.paired_tab.pair_changed(self.toggle_checkbox.IsChecked())
+            self.paired_tab.pair_changed(enable)
 
         for tab in self.dependent_tabs:
             tab.dependent_enable(enable)
@@ -149,10 +164,12 @@ class ParamsTab(ScrolledPanel):
         # print self.name, "pair_changed", value
         new_value = not value
 
-        if self.toggle_checkbox.IsChecked() != new_value:
+        if self.enabled() != new_value:
             self.set_toggle_state(not value)
-            self.toggle_checkbox.changed = True
             self.update_toggle_state(notify_pair=False)
+
+            if self.on_change_hook:
+                self.on_change_hook(self)
 
     def dependent_enable(self, enable):
         if enable:
@@ -160,17 +177,21 @@ class ParamsTab(ScrolledPanel):
         else:
             self.set_toggle_state(False)
             self.toggle_checkbox.Disable()
-            self.toggle_checkbox.changed = True
             self.update_toggle_state()
 
+        if self.on_change_hook:
+            self.on_change_hook(self)
+
     def set_toggle_state(self, value):
-        self.toggle_checkbox.SetValue(value)
+        if self.toggle_checkbox:
+            self.toggle_checkbox.SetValue(value)
+            self.changed_inputs.add(self.toggle_checkbox)
 
     def get_values(self):
         values = {}
 
         if self.toggle:
-            checked = self.toggle_checkbox.IsChecked()
+            checked = self.enabled()
             if self.toggle_checkbox in self.changed_inputs and not self.toggle.inverse:
                 values[self.toggle.name] = checked
 
@@ -180,7 +201,7 @@ class ParamsTab(ScrolledPanel):
                 return values
 
         for name, input in self.param_inputs.iteritems():
-            if input in self.changed_inputs:
+            if input in self.changed_inputs and input != self.toggle_checkbox:
                 values[name] = input.GetValue()
 
         return values
@@ -188,13 +209,19 @@ class ParamsTab(ScrolledPanel):
     def apply(self):
         values = self.get_values()
         for node in self.nodes:
-            #print >> sys.stderr, node.id, values
+            # print >> sys.stderr, "apply: ", self.name, node.id, values
             for name, value in values.iteritems():
                 node.set_param(name, value)
+
+    def on_change(self, callable):
+        self.on_change_hook = callable
 
     def changed(self, event):
         self.changed_inputs.add(event.GetEventObject())
         event.Skip()
+
+        if self.on_change_hook:
+            self.on_change_hook(self)
 
     def load_preset(self, preset):
         preset_data = preset.get(self.name, {})
@@ -212,17 +239,22 @@ class ParamsTab(ScrolledPanel):
             preset[name] = input.GetValue()
 
     def update_description(self):
-        description = "These settings will be applied to %d object%s." % \
-            (len(self.nodes), "s" if len(self.nodes) != 1 else "")
+        if len(self.nodes) == 1:
+            description = _("These settings will be applied to 1 object.")
+        else:
+            description = _("These settings will be applied to %d objects.") % len(self.nodes)
 
         if any(len(param.values) > 1 for param in self.params):
-            description += "\n • Some settings had different values across objects.  Select a value from the dropdown or enter a new one."
+            description += "\n • " + _("Some settings had different values across objects.  Select a value from the dropdown or enter a new one.")
 
         if self.dependent_tabs:
-            description += "\n • Disabling this tab will disable the following %d tabs." % len(self.dependent_tabs)
+            if len(self.dependent_tabs) == 1:
+                description += "\n • " + _("Disabling this tab will disable the following %d tabs.") % len(self.dependent_tabs)
+            else:
+                description += "\n • " + _("Disabling this tab will disable the following tab.")
 
         if self.paired_tab:
-            description += "\n • Enabling this tab will disable %s and vice-versa." % self.paired_tab.name
+            description += "\n • " + _("Enabling this tab will disable %s and vice-versa.") % self.paired_tab.name
 
         self.description_text = description
 
@@ -252,10 +284,10 @@ class ParamsTab(ScrolledPanel):
         # just to add space around the settings
         box = wx.BoxSizer(wx.VERTICAL)
 
-        summary_box = wx.StaticBox(self, wx.ID_ANY, label="Inkscape objects")
+        summary_box = wx.StaticBox(self, wx.ID_ANY, label=_("Inkscape objects"))
         sizer = wx.StaticBoxSizer(summary_box, wx.HORIZONTAL)
 #        sizer = wx.BoxSizer(wx.HORIZONTAL)
-        self.description = wx.StaticText(self, style=wx.TE_WORDWRAP)
+        self.description = wx.StaticText(self)
         self.update_description()
         self.description.SetLabel(self.description_text)
         self.description_container = box
@@ -267,7 +299,10 @@ class ParamsTab(ScrolledPanel):
             box.Add(self.toggle_checkbox, proportion=0, flag=wx.BOTTOM, border=10)
 
         for param in self.params:
-            self.settings_grid.Add(wx.StaticText(self, label=param.description), proportion=1, flag=wx.EXPAND|wx.RIGHT, border=40)
+            description = wx.StaticText(self, label=param.description)
+            description.SetToolTip(param.tooltip)
+
+            self.settings_grid.Add(description, proportion=1, flag=wx.EXPAND|wx.RIGHT, border=40)
 
             if param.type == 'boolean':
 
@@ -281,12 +316,12 @@ class ParamsTab(ScrolledPanel):
 
                 input.Bind(wx.EVT_CHECKBOX, self.changed)
             elif len(param.values) > 1:
-                input = wx.ComboBox(self, wx.ID_ANY, choices=param.values, style=wx.CB_DROPDOWN | wx.CB_SORT)
+                input = wx.ComboBox(self, wx.ID_ANY, choices=sorted(param.values), style=wx.CB_DROPDOWN)
                 input.Bind(wx.EVT_COMBOBOX, self.changed)
                 input.Bind(wx.EVT_TEXT, self.changed)
             else:
                 value = param.values[0] if param.values else ""
-                input = wx.TextCtrl(self, wx.ID_ANY, value=value)
+                input = wx.TextCtrl(self, wx.ID_ANY, value=str(value))
                 input.Bind(wx.EVT_TEXT, self.changed)
 
             self.param_inputs[param.name] = input
@@ -305,59 +340,169 @@ class SettingsFrame(wx.Frame):
     def __init__(self, *args, **kwargs):
         # begin wxGlade: MyFrame.__init__
         self.tabs_factory = kwargs.pop('tabs_factory', [])
-        wx.Frame.__init__(self, None, wx.ID_ANY, 
-                          "Embroidery Params"
+        self.cancel_hook = kwargs.pop('on_cancel', None)
+        wx.Frame.__init__(self, None, wx.ID_ANY,
+                          _("Embroidery Params")
                           )
         self.notebook = wx.Notebook(self, wx.ID_ANY)
         self.tabs = self.tabs_factory(self.notebook)
 
-        self.presets_box = wx.StaticBox(self, wx.ID_ANY, label="Presets")
+        for tab in self.tabs:
+            tab.on_change(self.update_simulator)
 
-        self.preset_chooser = wx.ComboBox(self, wx.ID_ANY, style=wx.CB_SORT)
+        self.simulate_window = None
+        self.simulate_thread = None
+        self.simulate_refresh_needed = Event()
+
+        wx.CallLater(1000, self.update_simulator)
+
+        self.presets_box = wx.StaticBox(self, wx.ID_ANY, label=_("Presets"))
+
+        self.preset_chooser = wx.ComboBox(self, wx.ID_ANY)
         self.update_preset_list()
 
-        self.load_preset_button = wx.Button(self, wx.ID_ANY, "Load")
+        self.load_preset_button = wx.Button(self, wx.ID_ANY, _("Load"))
         self.load_preset_button.Bind(wx.EVT_BUTTON, self.load_preset)
 
-        self.add_preset_button = wx.Button(self, wx.ID_ANY, "Add")
+        self.add_preset_button = wx.Button(self, wx.ID_ANY, _("Add"))
         self.add_preset_button.Bind(wx.EVT_BUTTON, self.add_preset)
 
-        self.overwrite_preset_button = wx.Button(self, wx.ID_ANY, "Overwrite")
+        self.overwrite_preset_button = wx.Button(self, wx.ID_ANY, _("Overwrite"))
         self.overwrite_preset_button.Bind(wx.EVT_BUTTON, self.overwrite_preset)
 
-        self.delete_preset_button = wx.Button(self, wx.ID_ANY, "Delete")
+        self.delete_preset_button = wx.Button(self, wx.ID_ANY, _("Delete"))
         self.delete_preset_button.Bind(wx.EVT_BUTTON, self.delete_preset)
 
-        self.cancel_button = wx.Button(self, wx.ID_ANY, "Cancel")
-        self.cancel_button.Bind(wx.EVT_BUTTON, self.close)
+        self.cancel_button = wx.Button(self, wx.ID_ANY, _("Cancel"))
+        self.cancel_button.Bind(wx.EVT_BUTTON, self.cancel)
+        self.Bind(wx.EVT_CLOSE, self.cancel)
 
-        self.use_last_button = wx.Button(self, wx.ID_ANY, "Use Last Settings")
+        self.use_last_button = wx.Button(self, wx.ID_ANY, _("Use Last Settings"))
         self.use_last_button.Bind(wx.EVT_BUTTON, self.use_last)
 
-        self.apply_button = wx.Button(self, wx.ID_ANY, "Apply and Quit")
+        self.apply_button = wx.Button(self, wx.ID_ANY, _("Apply and Quit"))
         self.apply_button.Bind(wx.EVT_BUTTON, self.apply)
 
         self.__set_properties()
         self.__do_layout()
         # end wxGlade
 
+    def update_simulator(self, tab=None):
+        if self.simulate_window:
+            self.simulate_window.stop()
+            self.simulate_window.clear()
+
+        if not self.simulate_thread or not self.simulate_thread.is_alive():
+            self.simulate_thread = Thread(target=self.simulate_worker)
+            self.simulate_thread.daemon = True
+            self.simulate_thread.start()
+
+        self.simulate_refresh_needed.set()
+
+    def simulate_worker(self):
+        while True:
+            self.simulate_refresh_needed.wait()
+            self.simulate_refresh_needed.clear()
+            self.update_patches()
+
+    def update_patches(self):
+        patches = self.generate_patches()
+
+        if patches and not self.simulate_refresh_needed.is_set():
+            wx.CallAfter(self.refresh_simulator, patches)
+
+    def refresh_simulator(self, patches):
+        if self.simulate_window:
+            self.simulate_window.stop()
+            self.simulate_window.load(patches=patches)
+        else:
+            my_rect = self.GetRect()
+            simulator_pos = my_rect.GetTopRight()
+            simulator_pos.x += 5
+
+            screen_rect = wx.Display(0).ClientArea
+            max_width = screen_rect.GetWidth() - my_rect.GetWidth()
+            max_height = screen_rect.GetHeight()
+
+            try:
+                self.simulate_window = EmbroiderySimulator(None, -1, _("Preview"),
+                                                           simulator_pos,
+                                                           size=(300, 300),
+                                                           patches=patches,
+                                                           on_close=self.simulate_window_closed,
+                                                           target_duration=5,
+                                                           max_width=max_width,
+                                                           max_height=max_height)
+            except:
+                error = traceback.format_exc()
+
+                try:
+                    # a window may have been created, so we need to destroy it
+                    # or the app will never exit
+                    wx.Window.FindWindowByName("Preview").Destroy()
+                except:
+                    pass
+
+                info_dialog(self, error, _("Internal Error"))
+
+            self.simulate_window.Show()
+            wx.CallLater(10, self.Raise)
+
+        wx.CallAfter(self.simulate_window.go)
+
+    def simulate_window_closed(self):
+        self.simulate_window = None
+
+    def generate_patches(self):
+        patches = []
+        nodes = []
+
+        for tab in self.tabs:
+            tab.apply()
+
+            if tab.enabled() and not tab.is_dependent_tab():
+                nodes.extend(tab.nodes)
+
+        # sort nodes into the proper stacking order
+        nodes.sort(key=lambda node: node.order)
+
+        try:
+            for node in nodes:
+                if self.simulate_refresh_needed.is_set():
+                    # cancel; params were updated and we need to start over
+                    return []
+
+                # Making a copy of the embroidery element is an easy
+                # way to drop the cache in the @cache decorators used
+                # for many params in embroider.py.
+
+                patches.extend(copy(node).embroider(None))
+        except SystemExit:
+            raise
+        except:
+            # Ignore errors.  This can be things like incorrect paths for
+            # satins or division by zero caused by incorrect param values.
+            pass
+
+        return patches
+
     def update_preset_list(self):
         preset_names = load_presets().keys()
         preset_names = [preset for preset in preset_names if preset != "__LAST__"]
-        self.preset_chooser.SetItems(preset_names)
+        self.preset_chooser.SetItems(sorted(preset_names))
 
     def get_preset_name(self):
         preset_name = self.preset_chooser.GetValue().strip()
         if preset_name:
             return preset_name
         else:
-            info_dialog(self, "Please enter or select a preset name first.", caption='Preset')
+            info_dialog(self, _("Please enter or select a preset name first."), caption=_('Preset'))
             return
 
     def check_and_load_preset(self, preset_name):
         preset = load_preset(preset_name)
         if not preset:
-            info_dialog(self, 'Preset "%s" not found.' % preset_name, caption='Preset')
+            info_dialog(self, _('Preset "%s" not found.') % preset_name, caption=_('Preset'))
 
         return preset
 
@@ -385,7 +530,7 @@ class SettingsFrame(wx.Frame):
             return
 
         if not overwrite and load_preset(preset_name):
-            info_dialog(self, 'Preset "%s" already exists.  Please use another name or press "Overwrite"' % preset_name, caption='Preset')
+            info_dialog(self, _('Preset "%s" already exists.  Please use another name or press "Overwrite"') % preset_name, caption=_('Preset'))
 
         save_preset(preset_name, self.get_preset_data())
         self.update_preset_list()
@@ -397,10 +542,10 @@ class SettingsFrame(wx.Frame):
 
 
     def _load_preset(self, preset_name):
-        preset = self.check_and_load_preset(preset_name)         
+        preset = self.check_and_load_preset(preset_name)
         if not preset:
             return
-        
+
         for tab in self.tabs:
             tab.load_preset(preset)
 
@@ -420,34 +565,45 @@ class SettingsFrame(wx.Frame):
         if not preset_name:
             return
 
-        preset = self.check_and_load_preset(preset_name)         
+        preset = self.check_and_load_preset(preset_name)
         if not preset:
             return
 
-        delete_preset(preset_name)        
+        delete_preset(preset_name)
         self.update_preset_list()
         self.preset_chooser.SetValue("")
 
         event.Skip()
 
-    def apply(self, event):
+    def _apply(self):
         for tab in self.tabs:
             tab.apply()
 
+    def apply(self, event):
+        self._apply()
         save_preset("__LAST__", self.get_preset_data())
-        self.Close()
+        self.close()
 
     def use_last(self, event):
         self._load_preset("__LAST__")
         self.apply(event)
 
-    def close(self, event):
-        self.Close()
+    def close(self):
+        if self.simulate_window:
+            self.simulate_window.stop()
+            self.simulate_window.Close()
+
+        self.Destroy()
+
+    def cancel(self, event):
+        if self.cancel_hook:
+            self.cancel_hook()
+
+        self.close()
 
     def __set_properties(self):
         # begin wxGlade: MyFrame.__set_properties
-        self.SetTitle("Embroidery Parameters")
-        self.notebook.SetMinSize((800, 400))
+        self.notebook.SetMinSize((800, 600))
         self.preset_chooser.SetSelection(-1)
         # end wxGlade
 
@@ -476,16 +632,9 @@ class SettingsFrame(wx.Frame):
         # end wxGlade
 
 class EmbroiderParams(inkex.Effect):
-    def get_nodes(self):
-        if self.selected:
-            nodes = []
-            for node in self.document.getroot().iter():
-                if node.get("id") in self.selected:
-                    nodes.extend(descendants(node))
-        else:
-            nodes = descendants(self.document.getroot())
-
-        return nodes
+    def __init__(self, *args, **kwargs):
+        self.cancelled = False
+        inkex.Effect.__init__(self, *args, **kwargs)
 
     def embroidery_classes(self, node):
         element = EmbroideryElement(node)
@@ -504,12 +653,14 @@ class EmbroiderParams(inkex.Effect):
         return classes
 
     def get_nodes_by_class(self):
-        nodes = self.get_nodes()
+        nodes = get_nodes(self)
         nodes_by_class = defaultdict(list)
 
-        for node in self.get_nodes():
+        for z, node in enumerate(nodes):
             for cls in self.embroidery_classes(node):
-                nodes_by_class[cls].append(node)
+                element = cls(node)
+                element.order = z
+                nodes_by_class[cls].append(element)
 
         return sorted(nodes_by_class.items(), key=lambda (cls, nodes): cls.__name__)
 
@@ -521,21 +672,23 @@ class EmbroiderParams(inkex.Effect):
         else:
             getter = 'get_param'
 
-        values = filter(lambda item: item is not None, 
-                        (getattr(node, getter)(param.name, param.default) for node in nodes))
+        values = filter(lambda item: item is not None,
+                        (getattr(node, getter)(param.name, str(param.default)) for node in nodes))
 
         return values
 
     def group_params(self, params):
+        def by_group_and_sort_index(param):
+            return param.group, param.sort_index
+
         def by_group(param):
             return param.group
 
-        return groupby(sorted(params, key=by_group), by_group)
+        return groupby(sorted(params, key=by_group_and_sort_index), by_group)
 
     def create_tabs(self, parent):
         tabs = []
         for cls, nodes in self.get_nodes_by_class():
-            nodes = [cls(node) for node in nodes]
             params = cls.get_params()
 
             for param in params:
@@ -587,16 +740,24 @@ class EmbroiderParams(inkex.Effect):
         return tabs
 
 
+    def cancel(self):
+        self.cancelled = True
+
     def effect(self):
         app = wx.App()
-        frame = SettingsFrame(tabs_factory=self.create_tabs)
+        frame = SettingsFrame(tabs_factory=self.create_tabs, on_cancel=self.cancel)
         frame.Show()
         app.MainLoop()
+
+        if self.cancelled:
+            # This prevents the superclass from outputting the SVG, because we
+            # may have modified the DOM.
+            sys.exit(0)
 
 
 def save_stderr():
     # GTK likes to spam stderr, which inkscape will show in a dialog.
-    null = open('/dev/null', 'w')
+    null = open(os.devnull, 'w')
     sys.stderr_dup = os.dup(sys.stderr.fileno())
     os.dup2(null.fileno(), 2)
     sys.stderr_backup = sys.stderr
@@ -606,7 +767,7 @@ def save_stderr():
 def restore_stderr():
     os.dup2(sys.stderr_dup, 2)
     sys.stderr_backup.write(sys.stderr.getvalue())
-    sys.sys.stderr = stderr_backup
+    sys.stderr = sys.stderr_backup
 
 
 # end of class MyFrame
@@ -616,6 +777,8 @@ if __name__ == "__main__":
     try:
         e = EmbroiderParams()
         e.affect()
+    except SystemExit:
+        raise
     except:
         traceback.print_exc()
 

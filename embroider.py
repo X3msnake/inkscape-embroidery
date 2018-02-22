@@ -1,13 +1,5 @@
 #!/usr/bin/python
 #
-# documentation: see included index.html
-# LICENSE:
-# Copyright 2010 by Jon Howell,
-# Originally licensed under <a href="http://www.gnu.org/licenses/quick-guide-gplv3.html">GPLv3</a>.
-# Copyright 2015 by Bas Wijnen <wijnen@debian.org>.
-# New parts are licensed under AGPL3 or later.
-# (Note that this means this work is licensed under the common part of those two: AGPL version 3.)
-#
 # Important resources:
 # lxml interface for walking SVG tree:
 # http://codespeak.net/lxml/tutorial.html#elementpath
@@ -19,6 +11,7 @@
 # http://www.achatina.de/sewing/main/TECHNICL.HTM
 
 import sys
+import traceback
 sys.path.append("/usr/share/inkscape/extensions")
 import os
 import subprocess
@@ -41,210 +34,20 @@ import shapely.ops
 import networkx
 from pprint import pformat
 
-import PyEmb
-from PyEmb import cache
-
-dbg = open("/tmp/embroider-debug.txt", "w")
-PyEmb.dbg = dbg
-
-SVG_PATH_TAG = inkex.addNS('path', 'svg')
-SVG_POLYLINE_TAG = inkex.addNS('polyline', 'svg')
-SVG_DEFS_TAG = inkex.addNS('defs', 'svg')
-SVG_GROUP_TAG = inkex.addNS('g', 'svg')
-
-EMBROIDERABLE_TAGS = (SVG_PATH_TAG, SVG_POLYLINE_TAG)
-
-
-class Param(object):
-    def __init__(self, name, description, unit=None, values=[], type=None, group=None, inverse=False, default=None):
-        self.name = name
-        self.description = description
-        self.unit = unit
-        self.values = values or [""]
-        self.type = type
-        self.group = group
-        self.inverse = inverse
-        self.default = default
-
-    def __repr__(self):
-        return "Param(%s)" % vars(self)
-
-# Decorate a member function or property with information about
-# the embroidery parameter it corresponds to
-def param(*args, **kwargs):
-    p = Param(*args, **kwargs)
-
-    def decorator(func):
-        func.param = p
-        return func
-
-    return decorator
-
-class EmbroideryElement(object):
-    def __init__(self, node, options=None):
-        self.node = node
-        self.options = options
-
-    @property
-    def id(self):
-        return self.node.get('id')
-
-    @classmethod
-    def get_params(cls):
-        params = []
-        for attr in dir(cls):
-            prop = getattr(cls, attr)
-            if isinstance(prop, property):
-                # The 'param' attribute is set by the 'param' decorator defined above.
-                if hasattr(prop.fget, 'param'):
-                    params.append(prop.fget.param)
-
-        return params
-
-    @cache
-    def get_param(self, param, default):
-        value = self.node.get("embroider_" + param, "").strip()
-
-        if not value:
-            value = getattr(self.options, param, default)
-
-        return value
-
-    @cache
-    def get_boolean_param(self, param, default=None):
-        value = self.get_param(param, default)
-
-        if isinstance(value, bool):
-            return value
-        else:
-            return value and (value.lower() in ('yes', 'y', 'true', 't', '1'))
-
-    @cache
-    def get_float_param(self, param, default=None):
-        try:
-            value = float(self.get_param(param, default))
-        except (TypeError, ValueError):
-            return default
-
-        if param.endswith('_mm'):
-            # print >> dbg, "get_float_param", param, value, "*", self.options.pixels_per_mm
-            value = value * self.options.pixels_per_mm
-
-        return value
-
-    @cache
-    def get_int_param(self, param, default=None):
-        try:
-            value = int(self.get_param(param, default))
-        except (TypeError, ValueError):
-            return default
-
-        if param.endswith('_mm'):
-            value = int(value * self.options.pixels_per_mm)
-
-        return value
-
-    def set_param(self, name, value):
-        self.node.set("embroider_%s" % name, str(value))
-
-    @cache
-    def get_style(self, style_name):
-        style = simplestyle.parseStyle(self.node.get("style"))
-        if (style_name not in style):
-            return None
-        value = style[style_name]
-        if value == 'none':
-            return None
-        return value
-
-    @cache
-    def has_style(self, style_name):
-        style = simplestyle.parseStyle(self.node.get("style"))
-        return style_name in style
-
-    @property
-    def path(self):
-        return cubicsuperpath.parsePath(self.node.get("d"))
-
-
-    @cache
-    def parse_path(self):
-        # A CSP is a  "cubic superpath".
-        #
-        # A "path" is a sequence of strung-together bezier curves.
-        #
-        # A "superpath" is a collection of paths that are all in one object.
-        #
-        # The "cubic" bit in "cubic superpath" is because the bezier curves
-        # inkscape uses involve cubic polynomials.
-        #
-        # Each path is a collection of tuples, each of the form:
-        #
-        # (control_before, point, control_after)
-        #
-        # A bezier curve segment is defined by an endpoint, a control point,
-        # a second control point, and a final endpoint.  A path is a bunch of
-        # bezier curves strung together.  One could represent a path as a set
-        # of four-tuples, but there would be redundancy because the ending
-        # point of one bezier is the starting point of the next.  Instead, a
-        # path is a set of 3-tuples as shown above, and one must construct
-        # each bezier curve by taking the appropriate endpoints and control
-        # points.  Bleh. It should be noted that a straight segment is
-        # represented by having the control point on each end equal to that
-        # end's point.
-        #
-        # In a path, each element in the 3-tuple is itself a tuple of (x, y).
-        # Tuples all the way down.  Hasn't anyone heard of using classes?
-
-        path = self.path
-
-        # start with the identity transform
-        transform = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]
-
-        # combine this node's transform with all parent groups' transforms
-        transform = simpletransform.composeParents(self.node, transform)
-
-        # apply the combined transform to this node's path
-        simpletransform.applyTransformToPath(transform, path)
-
-        return path
-
-    def flatten(self, path):
-        """approximate a path containing beziers with a series of points"""
-
-        path = deepcopy(path)
-
-        cspsubdiv(path, self.options.flat)
-
-        flattened = []
-
-        for comp in path:
-            vertices = []
-            for ctl in comp:
-                vertices.append((ctl[1][0], ctl[1][1]))
-            flattened.append(vertices)
-
-        return flattened
-
-    def to_patches(self, last_patch):
-        raise NotImplementedError("%s must implement to_path()" % self.__class__.__name__)
-
-    def fatal(self, message):
-        print >> sys.stderr, "error:", message
-        sys.exit(1)
-
+import inkstitch
+from inkstitch import _, cache, dbg, param, EmbroideryElement, get_nodes, SVG_POLYLINE_TAG, SVG_GROUP_TAG, PIXELS_PER_MM, get_viewbox_transform
 
 class Fill(EmbroideryElement):
     def __init__(self, *args, **kwargs):
         super(Fill, self).__init__(*args, **kwargs)
 
     @property
-    @param('auto_fill', 'Manually routed fill stitching', type='toggle', inverse=True, default=True)
+    @param('auto_fill', _('Manually routed fill stitching'), type='toggle', inverse=True, default=True)
     def auto_fill(self):
         return self.get_boolean_param('auto_fill', True)
 
     @property
-    @param('angle', 'Angle of lines of stitches', unit='deg', type='float')
+    @param('angle', _('Angle of lines of stitches'), unit='deg', type='float', default=0)
     @cache
     def angle(self):
         return math.radians(self.get_float_param('angle', 0))
@@ -254,22 +57,26 @@ class Fill(EmbroideryElement):
         return self.get_style("fill")
 
     @property
-    @param('flip', 'Flip fill (start right-to-left)', type='boolean')
+    @param('flip', _('Flip fill (start right-to-left)'), type='boolean', default=False)
     def flip(self):
         return self.get_boolean_param("flip", False)
 
     @property
-    @param('row_spacing_mm', 'Spacing between rows', unit='mm', type='float')
+    @param('row_spacing_mm', _('Spacing between rows'), unit='mm', type='float', default=0.25)
     def row_spacing(self):
-        return self.get_float_param("row_spacing_mm")
+        return max(self.get_float_param("row_spacing_mm", 0.25), 0.01)
 
     @property
-    @param('max_stitch_length_mm', 'Maximum fill stitch length', unit='mm', type='float')
+    def end_row_spacing(self):
+        return self.get_float_param("end_row_spacing_mm")
+
+    @property
+    @param('max_stitch_length_mm', _('Maximum fill stitch length'), unit='mm', type='float', default=3.0)
     def max_stitch_length(self):
-        return self.get_float_param("max_stitch_length_mm")
+        return max(self.get_float_param("max_stitch_length_mm", 3.0), 0.01)
 
     @property
-    @param('staggers', 'Stagger rows this many times before repeating', type='int')
+    @param('staggers', _('Stagger rows this many times before repeating'), type='int', default=4)
     def staggers(self):
         return self.get_int_param("staggers", 4)
 
@@ -312,7 +119,7 @@ class Fill(EmbroideryElement):
     @cache
     def east(self, angle):
         # "east" is the name of the direction that is to the right along a row
-        return PyEmb.Point(1, 0).rotate(-angle)
+        return inkstitch.Point(1, 0).rotate(-angle)
 
     @cache
     def north(self, angle):
@@ -329,24 +136,27 @@ class Fill(EmbroideryElement):
 
         return stitch - offset * self.east(angle)
 
-    def intersect_region_with_grating(self, angle=None, row_spacing=None):
+    def intersect_region_with_grating(self, angle=None, row_spacing=None, end_row_spacing=None):
         if angle is None:
             angle = self.angle
 
         if row_spacing is None:
             row_spacing = self.row_spacing
 
+        if end_row_spacing is None:
+            end_row_spacing = self.end_row_spacing
+
         # the max line length I'll need to intersect the whole shape is the diagonal
         (minx, miny, maxx, maxy) = self.shape.bounds
-        upper_left = PyEmb.Point(minx, miny)
-        lower_right = PyEmb.Point(maxx, maxy)
+        upper_left = inkstitch.Point(minx, miny)
+        lower_right = inkstitch.Point(maxx, maxy)
         length = (upper_left - lower_right).length()
         half_length = length / 2.0
 
         # Now get a unit vector rotated to the requested angle.  I use -angle
         # because shapely rotates clockwise, but my geometry textbooks taught
         # me to consider angles as counter-clockwise from the X axis.
-        direction = PyEmb.Point(1, 0).rotate(-angle)
+        direction = inkstitch.Point(1, 0).rotate(-angle)
 
         # and get a normal vector
         normal = direction.rotate(math.pi / 2)
@@ -354,7 +164,7 @@ class Fill(EmbroideryElement):
         # I'll start from the center, move in the normal direction some amount,
         # and then walk left and right half_length in each direction to create
         # a line segment in the grating.
-        center = PyEmb.Point((minx + maxx) / 2.0, (miny + maxy) / 2.0)
+        center = inkstitch.Point((minx + maxx) / 2.0, (miny + maxy) / 2.0)
 
         # I need to figure out how far I need to go along the normal to get to
         # the edge of the shape.  To do that, I'll rotate the bounding box
@@ -367,6 +177,10 @@ class Fill(EmbroideryElement):
         start -= center.y
         end -= center.y
 
+        height = abs(end - start)
+
+        print >> dbg, "grating:", start, end, height, row_spacing, end_row_spacing
+
         # offset start slightly so that rows are always an even multiple of
         # row_spacing_px from the origin.  This makes it so that abutting
         # fill regions at the same angle and spacing always line up nicely.
@@ -374,9 +188,11 @@ class Fill(EmbroideryElement):
 
         rows = []
 
-        while start < end:
-            p0 = center + normal * start + direction * half_length
-            p1 = center + normal * start - direction * half_length
+        current_row_y = start
+
+        while current_row_y < end:
+            p0 = center + normal * current_row_y + direction * half_length
+            p1 = center + normal * current_row_y - direction * half_length
             endpoints = [p0.as_tuple(), p1.as_tuple()]
             grating_line = shgeo.LineString(endpoints)
 
@@ -387,19 +203,23 @@ class Fill(EmbroideryElement):
             else:
                 if res.is_empty or len(res.coords) == 1:
                     # ignore if we intersected at a single point or no points
-                    start += row_spacing
-                    continue
-                runs = [res.coords]
+                    runs = []
+                else:
+                    runs = [res.coords]
 
-            runs.sort(key=lambda seg: (PyEmb.Point(*seg[0]) - upper_left).length())
+            if runs:
+                runs.sort(key=lambda seg: (inkstitch.Point(*seg[0]) - upper_left).length())
 
-            if self.flip:
-                runs.reverse()
-                runs = map(lambda run: tuple(reversed(run)), runs)
+                if self.flip:
+                    runs.reverse()
+                    runs = map(lambda run: tuple(reversed(run)), runs)
 
-            rows.append(runs)
+                rows.append(runs)
 
-            start += row_spacing
+            if end_row_spacing:
+                current_row_y += row_spacing + (end_row_spacing - row_spacing) * ((current_row_y - start) / height)
+            else:
+                current_row_y += row_spacing
 
         return rows
 
@@ -482,15 +302,15 @@ class Fill(EmbroideryElement):
         # abutting fill regions from pull_runs().
 
 
-        beg = PyEmb.Point(*beg)
-        end = PyEmb.Point(*end)
+        beg = inkstitch.Point(*beg)
+        end = inkstitch.Point(*end)
 
         row_direction = (end - beg).unit()
         segment_length = (end - beg).length()
 
         # only stitch the first point if it's a reasonable distance away from the
         # last stitch
-        if not patch.stitches or (beg - patch.stitches[-1]).length() > 0.5 * self.options.pixels_per_mm:
+        if not patch.stitches or (beg - patch.stitches[-1]).length() > 0.5 * PIXELS_PER_MM:
             patch.add_stitch(beg)
 
         first_stitch = self.adjust_stagger(beg, angle, row_spacing, max_stitch_length)
@@ -505,7 +325,7 @@ class Fill(EmbroideryElement):
             patch.add_stitch(beg + offset * row_direction)
             offset += max_stitch_length
 
-        if (end - patch.stitches[-1]).length() > 0.1 * self.options.pixels_per_mm:
+        if (end - patch.stitches[-1]).length() > 0.1 * PIXELS_PER_MM:
             patch.add_stitch(end)
 
 
@@ -550,7 +370,7 @@ class MaxQueueLengthExceeded(Exception):
 
 class AutoFill(Fill):
     @property
-    @param('auto_fill', 'Automatically routed fill stitching', type='toggle', default=True)
+    @param('auto_fill', _('Automatically routed fill stitching'), type='toggle', default=True)
     def auto_fill(self):
         return self.get_boolean_param('auto_fill', True)
 
@@ -569,17 +389,17 @@ class AutoFill(Fill):
         return False
 
     @property
-    @param('running_stitch_length_mm', 'Running stitch length (traversal between sections)', unit='mm', type='float')
+    @param('running_stitch_length_mm', _('Running stitch length (traversal between sections)'), unit='mm', type='float', default=1.5)
     def running_stitch_length(self):
-        return self.get_float_param("running_stitch_length_mm")
+        return max(self.get_float_param("running_stitch_length_mm", 1.5), 0.01)
 
     @property
-    @param('fill_underlay', 'Underlay', type='toggle', group='AutoFill Underlay')
+    @param('fill_underlay', _('Underlay'), type='toggle', group=_('AutoFill Underlay'), default=False)
     def fill_underlay(self):
-        return self.get_boolean_param("fill_underlay")
+        return self.get_boolean_param("fill_underlay", default=False)
 
     @property
-    @param('fill_underlay_angle', 'Fill angle (default: fill angle + 90 deg)', unit='deg', group='AutoFill Underlay', type='float')
+    @param('fill_underlay_angle', _('Fill angle (default: fill angle + 90 deg)'), unit='deg', group=_('AutoFill Underlay'), type='float')
     @cache
     def fill_underlay_angle(self):
         underlay_angle = self.get_float_param("fill_underlay_angle")
@@ -590,13 +410,13 @@ class AutoFill(Fill):
             return self.angle + math.pi / 2.0
 
     @property
-    @param('fill_underlay_row_spacing_mm', 'Row spacing (default: 3x fill row spacing)', unit='mm', group='AutoFill Underlay', type='float')
+    @param('fill_underlay_row_spacing_mm', _('Row spacing (default: 3x fill row spacing)'), unit='mm', group=_('AutoFill Underlay'), type='float')
     @cache
     def fill_underlay_row_spacing(self):
         return self.get_float_param("fill_underlay_row_spacing_mm") or self.row_spacing * 3
 
     @property
-    @param('fill_underlay_max_stitch_length_mm', 'Max stitch length', unit='mm', group='AutoFill Underlay', type='float')
+    @param('fill_underlay_max_stitch_length_mm', _('Max stitch length'), unit='mm', group=_('AutoFill Underlay'), type='float')
     @cache
     def fill_underlay_max_stitch_length(self):
         return self.get_float_param("fill_underlay_max_stitch_length_mm") or self.max_stitch_length
@@ -683,9 +503,9 @@ class AutoFill(Fill):
             # heuristic: change the order I visit the nodes in the outline if necessary.
             # If the start and endpoints are in the same row, I can't tell which row
             # I should treat it as being in.
-            while True:
-                row0 = self.row_num(PyEmb.Point(*nodes[0]), angle, row_spacing)
-                row1 = self.row_num(PyEmb.Point(*nodes[1]), angle, row_spacing)
+            for i in xrange(len(nodes)):
+                row0 = self.row_num(inkstitch.Point(*nodes[0]), angle, row_spacing)
+                row1 = self.row_num(inkstitch.Point(*nodes[1]), angle, row_spacing)
 
                 if row0 == row1:
                     nodes = nodes[1:] + [nodes[0]]
@@ -700,7 +520,7 @@ class AutoFill(Fill):
             else:
                 edge_set = 1
 
-            #print >> sys.stderr, outline_index, "es", edge_set, "rn", row_num, PyEmb.Point(*nodes[0]) * self.north(angle), PyEmb.Point(*nodes[1]) * self.north(angle)
+            #print >> sys.stderr, outline_index, "es", edge_set, "rn", row_num, inkstitch.Point(*nodes[0]) * self.north(angle), inkstitch.Point(*nodes[1]) * self.north(angle)
 
             # add an edge between each successive node
             for i, (node1, node2) in enumerate(zip(nodes, nodes[1:] + [nodes[0]])):
@@ -708,8 +528,8 @@ class AutoFill(Fill):
 
                 # duplicate edges contained in every other row (exactly half
                 # will be duplicated)
-                row_num = min(self.row_num(PyEmb.Point(*node1), angle, row_spacing),
-                              self.row_num(PyEmb.Point(*node2), angle, row_spacing))
+                row_num = min(self.row_num(inkstitch.Point(*node1), angle, row_spacing),
+                              self.row_num(inkstitch.Point(*node2), angle, row_spacing))
 
                 # duplicate every other edge around this outline
                 if i % 2 == edge_set:
@@ -717,7 +537,7 @@ class AutoFill(Fill):
 
 
         if not networkx.is_eulerian(graph):
-            raise Exception("something went wrong: graph is not eulerian")
+            raise Exception(_("Unable to autofill.  This most often happens because your shape is made up of multiple sections that aren't connected."))
 
         return graph
 
@@ -892,7 +712,7 @@ class AutoFill(Fill):
             result = self.find_loop(graph, nodes_visited)
 
             if not result:
-                print >> sys.stderr, "Unexpected error filling region. Please send your SVG to lexelby@github."
+                print >> sys.stderr, _("Unexpected error while generating fill stitches. Please send your SVG file to lexelby@github.")
                 break
 
             loop, segments = result
@@ -979,27 +799,31 @@ class AutoFill(Fill):
         direction = math.copysign(1.0, distance)
         one_stitch = self.running_stitch_length * direction
 
-        print >> dbg, "connect_points:", start, end, distance, stitches, direction
+        print >> dbg, "connect_points:", outline_index, start, end, distance, stitches, direction
+        dbg.flush()
 
-        patch.add_stitch(PyEmb.Point(*start))
+        patch.add_stitch(inkstitch.Point(*start))
 
         for i in xrange(stitches):
             pos = (pos + one_stitch) % self.outline_length
 
-            patch.add_stitch(PyEmb.Point(*outline.interpolate(pos).coords[0]))
+            patch.add_stitch(inkstitch.Point(*outline.interpolate(pos).coords[0]))
 
-        end = PyEmb.Point(*end)
-        if (end - patch.stitches[-1]).length() > 0.1 * self.options.pixels_per_mm:
+        end = inkstitch.Point(*end)
+        if (end - patch.stitches[-1]).length() > 0.1 * PIXELS_PER_MM:
             patch.add_stitch(end)
+
+        print >> dbg, "end connect_points"
+        dbg.flush()
 
     def path_to_patch(self, graph, path, angle, row_spacing, max_stitch_length):
         path = self.collapse_sequential_outline_edges(graph, path)
 
         patch = Patch(color=self.color)
-        #patch.add_stitch(PyEmb.Point(*path[0][0]))
+        #patch.add_stitch(inkstitch.Point(*path[0][0]))
 
         #for edge in path:
-        #    patch.add_stitch(PyEmb.Point(*edge[1]))
+        #    patch.add_stitch(inkstitch.Point(*edge[1]))
 
         for edge in path:
             if graph.has_edge(*edge, key="segment"):
@@ -1011,6 +835,9 @@ class AutoFill(Fill):
 
     def do_auto_fill(self, angle, row_spacing, max_stitch_length, starting_point=None):
         patches = []
+
+        print >> dbg, "start do_auto_fill"
+        dbg.flush()
 
         rows_of_segments = self.intersect_region_with_grating(angle, row_spacing)
         segments = [segment for row in rows_of_segments for segment in row]
@@ -1025,6 +852,9 @@ class AutoFill(Fill):
 
         patches.append(self.path_to_patch(graph, path, angle, row_spacing, max_stitch_length))
 
+        print >> dbg, "end do_auto_fill"
+        dbg.flush()
+
         return patches
 
 
@@ -1035,7 +865,7 @@ class AutoFill(Fill):
             starting_point = None
         else:
             nearest_point = self.outline.interpolate(self.outline.project(shgeo.Point(last_patch.stitches[-1])))
-            starting_point = PyEmb.Point(*nearest_point.coords[0])
+            starting_point = inkstitch.Point(*nearest_point.coords[0])
 
         if self.fill_underlay:
             patches.extend(self.do_auto_fill(self.fill_underlay_angle, self.fill_underlay_row_spacing, self.fill_underlay_max_stitch_length, starting_point))
@@ -1043,12 +873,15 @@ class AutoFill(Fill):
 
         patches.extend(self.do_auto_fill(self.angle, self.row_spacing, self.max_stitch_length, starting_point))
 
+        print >> dbg, "end AutoFill.to_patches"
+        dbg.flush()
+
         return patches
 
 
 class Stroke(EmbroideryElement):
     @property
-    @param('satin_column', 'Satin along paths', type='toggle', inverse=True)
+    @param('satin_column', _('Satin stitch along paths'), type='toggle', inverse=True)
     def satin_column(self):
         return self.get_boolean_param("satin_column")
 
@@ -1071,18 +904,18 @@ class Stroke(EmbroideryElement):
         return self.get_style("stroke-dasharray") is not None
 
     @property
-    @param('running_stitch_length_mm', 'Running stitch length', unit='mm', type='float')
+    @param('running_stitch_length_mm', _('Running stitch length'), unit='mm', type='float', default=1.5)
     def running_stitch_length(self):
-        return self.get_float_param("running_stitch_length_mm")
+        return max(self.get_float_param("running_stitch_length_mm", 1.5), 0.01)
 
     @property
-    @param('zigzag_spacing_mm', 'Zig-zag spacing (peak-to-peak)', unit='mm', type='float')
+    @param('zigzag_spacing_mm', _('Zig-zag spacing (peak-to-peak)'), unit='mm', type='float', default=0.4)
     @cache
     def zigzag_spacing(self):
-        return self.get_float_param("zigzag_spacing_mm")
+        return max(self.get_float_param("zigzag_spacing_mm", 0.4), 0.01)
 
     @property
-    @param('repeats', 'Repeats', type='int')
+    @param('repeats', _('Repeats'), type='int', default="1")
     def repeats(self):
         return self.get_int_param("repeats", 1)
 
@@ -1147,7 +980,7 @@ class Stroke(EmbroideryElement):
         patches = []
 
         for path in self.paths:
-            path = [PyEmb.Point(x, y) for x, y in path]
+            path = [inkstitch.Point(x, y) for x, y in path]
             if self.is_running_stitch():
                 patch = self.stroke_points(path, self.running_stitch_length, stroke_width=0.0)
             else:
@@ -1163,7 +996,7 @@ class SatinColumn(EmbroideryElement):
         super(SatinColumn, self).__init__(*args, **kwargs)
 
     @property
-    @param('satin_column', 'Custom satin column', type='toggle')
+    @param('satin_column', _('Custom satin column'), type='toggle')
     def satin_column(self):
         return self.get_boolean_param("satin_column")
 
@@ -1172,13 +1005,13 @@ class SatinColumn(EmbroideryElement):
         return self.get_style("stroke")
 
     @property
-    @param('zigzag_spacing_mm', 'Zig-zag spacing (peak-to-peak)', unit='mm', type='float')
+    @param('zigzag_spacing_mm', _('Zig-zag spacing (peak-to-peak)'), unit='mm', type='float', default=0.4)
     def zigzag_spacing(self):
         # peak-to-peak distance between zigzags
-        return self.get_float_param("zigzag_spacing_mm")
+        return max(self.get_float_param("zigzag_spacing_mm", 0.4), 0.01)
 
     @property
-    @param('pull_compensation_mm', 'Pull compensation', unit='mm', type='float')
+    @param('pull_compensation_mm', _('Pull compensation'), unit='mm', type='float')
     def pull_compensation(self):
         # In satin stitch, the stitches have a tendency to pull together and
         # narrow the entire column.  We can compensate for this by stitching
@@ -1186,50 +1019,47 @@ class SatinColumn(EmbroideryElement):
         return self.get_float_param("pull_compensation_mm", 0)
 
     @property
-    @param('contour_underlay', 'Contour underlay', type='toggle', group='Contour Underlay')
+    @param('contour_underlay', _('Contour underlay'), type='toggle', group=_('Contour Underlay'))
     def contour_underlay(self):
         # "Contour underlay" is stitching just inside the rectangular shape
         # of the satin column; that is, up one side and down the other.
         return self.get_boolean_param("contour_underlay")
 
     @property
-    @param('contour_underlay_stitch_length_mm', 'Stitch length', unit='mm', group='Contour Underlay', type='float')
+    @param('contour_underlay_stitch_length_mm', _('Stitch length'), unit='mm', group=_('Contour Underlay'), type='float', default=1.5)
     def contour_underlay_stitch_length(self):
-        # use "contour_underlay_stitch_length", or, if not set, default to "stitch_length"
-        return self.get_float_param("contour_underlay_stitch_length_mm") or self.get_float_param("running_stitch_length_mm")
+        return max(self.get_float_param("contour_underlay_stitch_length_mm", 1.5), 0.01)
 
     @property
-    @param('contour_underlay_inset_mm', 'Contour underlay inset amount', unit='mm', group='Contour Underlay', type='float')
+    @param('contour_underlay_inset_mm', _('Contour underlay inset amount'), unit='mm', group=_('Contour Underlay'), type='float', default=0.4)
     def contour_underlay_inset(self):
         # how far inside the edge of the column to stitch the underlay
         return self.get_float_param("contour_underlay_inset_mm", 0.4)
 
     @property
-    @param('center_walk_underlay', 'Center-walk underlay', type='toggle', group='Center-Walk Underlay')
+    @param('center_walk_underlay', _('Center-walk underlay'), type='toggle', group=_('Center-Walk Underlay'))
     def center_walk_underlay(self):
         # "Center walk underlay" is stitching down and back in the centerline
         # between the two sides of the satin column.
         return self.get_boolean_param("center_walk_underlay")
 
     @property
-    @param('center_walk_underlay_stitch_length_mm', 'Stitch length', unit='mm', group='Center-Walk Underlay', type='float')
+    @param('center_walk_underlay_stitch_length_mm', _('Stitch length'), unit='mm', group=_('Center-Walk Underlay'), type='float', default=1.5)
     def center_walk_underlay_stitch_length(self):
-        # use "center_walk_underlay_stitch_length", or, if not set, default to "stitch_length"
-        return self.get_float_param("center_walk_underlay_stitch_length_mm") or self.get_float_param("running_stitch_length_mm")
+        return max(self.get_float_param("center_walk_underlay_stitch_length_mm", 1.5), 0.01)
 
     @property
-    @param('zigzag_underlay', 'Zig-zag underlay', type='toggle', group='Zig-zag Underlay')
+    @param('zigzag_underlay', _('Zig-zag underlay'), type='toggle', group=_('Zig-zag Underlay'))
     def zigzag_underlay(self):
         return self.get_boolean_param("zigzag_underlay")
 
     @property
-    @param('zigzag_underlay_spacing_mm', 'Zig-Zag spacing (peak-to-peak)', unit='mm', group='Zig-zag Underlay', type='float')
+    @param('zigzag_underlay_spacing_mm', _('Zig-Zag spacing (peak-to-peak)'), unit='mm', group=_('Zig-zag Underlay'), type='float', default=3)
     def zigzag_underlay_spacing(self):
-        # peak-to-peak distance between zigzags in zigzag underlay
-        return self.get_float_param("zigzag_underlay_spacing_mm", 1)
+        return max(self.get_float_param("zigzag_underlay_spacing_mm", 3), 0.01)
 
     @property
-    @param('zigzag_underlay_inset', 'Inset amount (default: half of contour underlay inset)', unit='mm', group='Zig-zag Underlay', type='float')
+    @param('zigzag_underlay_inset_mm', _('Inset amount (default: half of contour underlay inset)'), unit='mm', group=_('Zig-zag Underlay'), type='float')
     def zigzag_underlay_inset(self):
         # how far in from the edge of the satin the points in the zigzags
         # should be
@@ -1275,16 +1105,18 @@ class SatinColumn(EmbroideryElement):
 
         for rail in rails:
             if not rail.is_simple:
-                self.fatal("One or more rails crosses itself, and this is not allowed.  Please split into multiple satin columns.")
+                self.fatal(_("One or more rails crosses itself, and this is not allowed.  Please split into multiple satin columns."))
 
             # handle null intersections here?
             linestrings = shapely.ops.split(rail, rungs)
 
+            print >> dbg, "rails and rungs", [str(rail) for rail in rails], [str(rung) for rung in rungs]
             if len(linestrings.geoms) < len(rungs.geoms) + 1:
-                print >> dbg, [str(rail) for rail in rails], [str(rung) for rung in rungs]
-                self.fatal("Expected %d linestrings, got %d" % (len(rungs.geoms) + 1, len(linestrings.geoms)))
+                self.fatal(_("satin column: One or more of the rungs doesn't intersect both rails.") + "  " + _("Each rail should intersect both rungs once."))
+            elif len(linestrings.geoms) > len(rungs.geoms) + 1:
+                self.fatal(_("satin column: One or more of the rungs intersects the rails more than once.") + "  " + _("Each rail should intersect both rungs once."))
 
-            paths = [[PyEmb.Point(*coord) for coord in ls.coords] for ls in linestrings.geoms]
+            paths = [[inkstitch.Point(*coord) for coord in ls.coords] for ls in linestrings.geoms]
             result.append(paths)
 
         return zip(*result)
@@ -1308,7 +1140,7 @@ class SatinColumn(EmbroideryElement):
             # iterate over pairs of 3-tuples
             for prev, current in zip(path[:-1], path[1:]):
                 flattened_segment = self.flatten([[prev, current]])
-                flattened_segment = [PyEmb.Point(x, y) for x, y in flattened_segment[0]]
+                flattened_segment = [inkstitch.Point(x, y) for x, y in flattened_segment[0]]
                 flattened_path.append(flattened_segment)
 
             paths.append(flattened_path)
@@ -1323,11 +1155,12 @@ class SatinColumn(EmbroideryElement):
         node_id = self.node.get("id")
 
         if self.get_style("fill") is not None:
-            self.fatal("satin column: object %s has a fill (but should not)" % node_id)
+            self.fatal(_("satin column: object %s has a fill (but should not)") % node_id)
 
         if len(self.csp) == 2:
             if len(self.csp[0]) != len(self.csp[1]):
-                self.fatal("satin column: object %s has two paths with an unequal number of points (%s and %s)" % (node_id, len(self.csp[0]), len(self.csp[1])))
+                self.fatal(_("satin column: object %(id)s has two paths with an unequal number of points (%(length1)d and %(length2)d)") % \
+                             dict(id=node_id, length1=len(self.csp[0]), length2=len(self.csp[1])))
 
     def offset_points(self, pos1, pos2, offset_px):
         # Expand or contract two points about their midpoint.  This is
@@ -1617,7 +1450,7 @@ class Polyline(EmbroideryElement):
         patch = Patch(color=self.color)
 
         for stitch in self.stitches:
-            patch.add_stitch(PyEmb.Point(*stitch))
+            patch.add_stitch(inkstitch.Point(*stitch))
 
         return [patch]
 
@@ -1647,28 +1480,12 @@ def detect_classes(node):
             return classes
 
 
-def descendants(node):
-    nodes = []
-    element = EmbroideryElement(node)
-
-    if element.has_style('display') and element.get_style('display') is None:
-        return []
-
-    if node.tag == SVG_DEFS_TAG:
-        return []
-
-    for child in node:
-        nodes.extend(descendants(child))
-
-    if node.tag in EMBROIDERABLE_TAGS:
-        nodes.append(node)
-
-    return nodes
-
 class Patch:
-    def __init__(self, color=None, stitches=None):
+    def __init__(self, color=None, stitches=None, trim_after=False, stop_after=False):
         self.color = color
         self.stitches = stitches or []
+        self.trim_after = trim_after
+        self.stop_after = stop_after
 
     def __add__(self, other):
         if isinstance(other, Patch):
@@ -1683,12 +1500,64 @@ class Patch:
         return Patch(self.color, self.stitches[::-1])
 
 
+def process_stop_after(stitches):
+    # The user wants the machine to pause after this patch.  This can
+    # be useful for applique and similar on multi-needle machines that
+    # normally would not stop between colors.
+    #
+    # On such machines, the user assigns needles to the colors in the
+    # design before starting stitching.  C01, C02, etc are normal
+    # needles, but C00 is special.  For a block of stitches assigned
+    # to C00, the machine will continue sewing with the last color it
+    # had and pause after it completes the C00 block.
+    #
+    # That means we need to introduce an artificial color change
+    # shortly before the current stitch so that the user can set that
+    # to C00.  We'll go back 3 stitches and do that:
+
+    if len(stitches) >= 3:
+        stitches[-3].stop = True
+
+    # and also add a color change on this stitch, completing the C00
+    # block:
+
+    stitches[-1].stop = True
+
+    # reference for the above: https://github.com/lexelby/inkstitch/pull/29#issuecomment-359175447
+
+
+def process_trim(stitches, next_stitch):
+    # DST (and maybe other formats?) has no actual TRIM instruction.
+    # Instead, 3 sequential JUMPs cause the machine to trim the thread.
+    #
+    # To support both DST and other formats, we'll add a TRIM and two
+    # JUMPs.  The TRIM will be converted to a JUMP by libembroidery
+    # if saving to DST, resulting in the 3-jump sequence.
+
+    delta = next_stitch - stitches[-1]
+    delta = delta * (1/4.0)
+
+    pos = stitches[-1]
+
+    for i in xrange(3):
+        pos += delta
+        stitches.append(inkstitch.Stitch(pos.x, pos.y, stitches[-1].color, jump=True))
+
+    # first one should be TRIM instead of JUMP
+    stitches[-3].jump = False
+    stitches[-3].trim = True
+
+
 def patches_to_stitches(patch_list, collapse_len_px=0):
     stitches = []
 
     last_stitch = None
     last_color = None
+    need_trim = False
     for patch in patch_list:
+        if not patch.stitches:
+            continue
+
         jump_stitch = True
         for stitch in patch.stitches:
             if last_stitch and last_color == patch.color:
@@ -1704,89 +1573,113 @@ def patches_to_stitches(patch_list, collapse_len_px=0):
                         # dbg.write("... collapsed\n")
                         jump_stitch = False
 
-            # dbg.write("stitch color %s\n" % patch.color)
+            if stitches and last_color and last_color != patch.color:
+                # add a color change
+                stitches.append(inkstitch.Stitch(last_stitch.x, last_stitch.y, last_color, stop=True))
 
-            newStitch = PyEmb.Stitch(stitch.x, stitch.y, patch.color, jump_stitch)
-            stitches.append(newStitch)
+            if need_trim:
+                process_trim(stitches, stitch)
+                need_trim = False
+
+            if jump_stitch:
+                stitches.append(inkstitch.Stitch(stitch.x, stitch.y, patch.color, jump=True))
+
+            stitches.append(inkstitch.Stitch(stitch.x, stitch.y, patch.color, jump=False))
 
             jump_stitch = False
             last_stitch = stitch
             last_color = patch.color
 
+        if patch.trim_after:
+            need_trim = True
+
+        if patch.stop_after:
+            process_stop_after(stitches)
+
     return stitches
 
-
-def stitches_to_paths(stitches):
-    paths = []
+def stitches_to_polylines(stitches):
+    polylines = []
     last_color = None
     last_stitch = None
+    trimming = False
+
     for stitch in stitches:
-        if stitch.jump_stitch:
-            if last_color == stitch.color:
-                paths.append([None, []])
-                if last_stitch is not None:
-                    paths[-1][1].append(['M', last_stitch.as_tuple()])
-                    paths[-1][1].append(['L', stitch.as_tuple()])
-            last_color = None
-        if stitch.color != last_color:
-            paths.append([stitch.color, []])
-        paths[-1][1].append(['L' if len(paths[-1][1]) > 0 else 'M', stitch.as_tuple()])
+        if stitch.color != last_color or stitch.trim:
+            trimming = True
+            polylines.append([stitch.color, []])
+
+        if trimming and (stitch.jump or stitch.trim):
+            continue
+
+        trimming = False
+
+        polylines[-1][1].append(stitch.as_tuple())
+
         last_color = stitch.color
         last_stitch = stitch
-    return paths
 
+    return polylines
 
 def emit_inkscape(parent, stitches):
-    for color, path in stitches_to_paths(stitches):
-        # dbg.write('path: %s %s\n' % (color, repr(path)))
+    transform = get_viewbox_transform(parent.getroottree().getroot())
+
+    # we need to correct for the viewbox
+    transform = simpletransform.invertTransform(transform)
+    transform = simpletransform.formatTransform(transform)
+
+    for color, polyline in stitches_to_polylines(stitches):
+        # dbg.write('polyline: %s %s\n' % (color, repr(polyline)))
         inkex.etree.SubElement(parent,
-                               inkex.addNS('path', 'svg'),
+                               inkex.addNS('polyline', 'svg'),
                                {'style': simplestyle.formatStyle(
                                    {'stroke': color if color is not None else '#000000',
                                     'stroke-width': "0.4",
                                     'fill': 'none'}),
-                                   'd': simplepath.formatPath(path),
+                                   'points': " ".join(",".join(str(coord) for coord in point) for point in polyline),
+                                'transform': transform
                                 })
 
+def get_elements(effect):
+    elements = []
+    nodes = get_nodes(effect)
+
+    for node in nodes:
+        classes = detect_classes(node)
+        elements.extend(cls(node) for cls in classes)
+
+    return elements
+
+
+def elements_to_patches(elements):
+    patches = []
+    for element in elements:
+        if patches:
+            last_patch = patches[-1]
+        else:
+            last_patch = None
+
+        patches.extend(element.embroider(last_patch))
+
+    return patches
 
 class Embroider(inkex.Effect):
 
     def __init__(self, *args, **kwargs):
         inkex.Effect.__init__(self)
-        self.OptionParser.add_option("-r", "--row_spacing_mm",
-                                     action="store", type="float",
-                                     dest="row_spacing_mm", default=0.4,
-                                     help="row spacing (mm)")
-        self.OptionParser.add_option("-z", "--zigzag_spacing_mm",
-                                     action="store", type="float",
-                                     dest="zigzag_spacing_mm", default=1.0,
-                                     help="zigzag spacing (mm)")
-        self.OptionParser.add_option("-l", "--max_stitch_len_mm",
-                                     action="store", type="float",
-                                     dest="max_stitch_length_mm", default=3.0,
-                                     help="max stitch length (mm)")
-        self.OptionParser.add_option("--running_stitch_len_mm",
-                                     action="store", type="float",
-                                     dest="running_stitch_length_mm", default=3.0,
-                                     help="running stitch length (mm)")
         self.OptionParser.add_option("-c", "--collapse_len_mm",
                                      action="store", type="float",
                                      dest="collapse_length_mm", default=0.0,
                                      help="max collapse length (mm)")
-        self.OptionParser.add_option("-f", "--flatness",
-                                     action="store", type="float",
-                                     dest="flat", default=0.1,
-                                     help="Minimum flatness of the subdivided curves")
         self.OptionParser.add_option("--hide_layers",
                                      action="store", type="choice",
                                      choices=["true", "false"],
                                      dest="hide_layers", default="true",
                                      help="Hide all other layers when the embroidery layer is generated")
         self.OptionParser.add_option("-O", "--output_format",
-                                     action="store", type="choice",
-                                     choices=["melco", "csv", "gcode"],
-                                     dest="output_format", default="melco",
-                                     help="File output format")
+                                     action="store", type="string",
+                                     dest="output_format", default="csv",
+                                     help="Output file extenstion (default: csv)")
         self.OptionParser.add_option("-P", "--path",
                                      action="store", type="string",
                                      dest="path", default=".",
@@ -1799,26 +1692,14 @@ class Embroider(inkex.Effect):
                                      action="store", type="int",
                                      dest="max_backups", default=5,
                                      help="Max number of backups of output files to keep.")
-        self.OptionParser.add_option("-p", "--pixels_per_mm",
-                                     action="store", type="float",
-                                     dest="pixels_per_mm", default=10,
-                                     help="Number of on-screen pixels per millimeter.")
-        self.patches = []
-
-    def handle_node(self, node):
-        print >> dbg, "handling node", node.get('id'), node.tag
-        nodes = descendants(node)
-        for node in nodes:
-            classes = detect_classes(node)
-            print >> dbg, "classes:", classes
-            self.elements.extend(cls(node, self.options) for cls in classes)
+        self.OptionParser.usage += _("\n\nSeeing a 'no such option' message?  Please restart Inkscape to fix.")
 
     def get_output_path(self):
         if self.options.output_file:
             output_path = os.path.join(self.options.path, self.options.output_file)
         else:
             svg_filename = self.document.getroot().get(inkex.addNS('docname', 'sodipodi'), "embroidery.svg")
-            csv_filename = svg_filename.replace('.svg', '.csv')
+            csv_filename = svg_filename.replace('.svg', '.%s' % self.options.output_format)
             output_path = os.path.join(self.options.path, csv_filename)
 
         def add_suffix(path, suffix):
@@ -1855,50 +1736,26 @@ class Embroider(inkex.Effect):
 
         self.patch_list = []
 
-        print >> dbg, "starting nodes: %s\n" % time.time()
-        dbg.flush()
-
-        self.elements = []
-
-        if self.selected:
-            # be sure to visit selected nodes in the order they're stacked in
-            # the document
-            for node in self.document.getroot().iter():
-                if node.get("id") in self.selected:
-                    self.handle_node(node)
-        else:
-            self.handle_node(self.document.getroot())
-
-        print >> dbg, "finished nodes: %s" % time.time()
-        dbg.flush()
+        self.elements = get_elements(self)
 
         if not self.elements:
             if self.selected:
-                inkex.errormsg("No embroiderable paths selected.")
+                inkex.errormsg(_("No embroiderable paths selected."))
             else:
-                inkex.errormsg("No embroiderable paths found in document.")
-            inkex.errormsg("Tip: use Path -> Object to Path to convert non-paths before embroidering.")
+                inkex.errormsg(_("No embroiderable paths found in document."))
+            inkex.errormsg(_("Tip: use Path -> Object to Path to convert non-paths before embroidering."))
             return
 
         if self.options.hide_layers:
             self.hide_layers()
 
-        patches = []
-        for element in self.elements:
-            if patches:
-                last_patch = patches[-1]
-            else:
-                last_patch = None
-
-            patches.extend(element.to_patches(last_patch))
-
-        stitches = patches_to_stitches(patches, self.options.collapse_length_mm * self.options.pixels_per_mm)
-        emb = PyEmb.Embroidery(stitches, self.options.pixels_per_mm)
-        emb.export(self.get_output_path(), self.options.output_format)
+        patches = elements_to_patches(self.elements)
+        stitches = patches_to_stitches(patches, self.options.collapse_length_mm * PIXELS_PER_MM)
+        inkstitch.write_embroidery_file(self.get_output_path(), stitches)
 
         new_layer = inkex.etree.SubElement(self.document.getroot(), SVG_GROUP_TAG, {})
         new_layer.set('id', self.uniqueId("embroidery"))
-        new_layer.set(inkex.addNS('label', 'inkscape'), 'Embroidery')
+        new_layer.set(inkex.addNS('label', 'inkscape'), _('Embroidery'))
         new_layer.set(inkex.addNS('groupmode', 'inkscape'), 'layer')
 
         emit_inkscape(new_layer, stitches)
@@ -1908,7 +1765,12 @@ class Embroider(inkex.Effect):
 if __name__ == '__main__':
     sys.setrecursionlimit(100000)
     e = Embroider()
-    e.affect()
-    dbg.flush()
 
-dbg.close()
+    try:
+        e.affect()
+    except KeyboardInterrupt:
+        print >> dbg, "interrupted!"
+
+        print >> dbg, traceback.format_exc()
+
+    dbg.flush()
